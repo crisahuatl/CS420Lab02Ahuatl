@@ -1,0 +1,209 @@
+/*
+Cristopher Ahuatl
+Dr. Jeffrey
+CS-420-02 Fall 2022
+Lab 02: Computing Histograms Using Multithreads
+	Each histogram contains values from 0 - 255. Each 8-bit value is to be interpreted as an unsigned number.
+	Implement two algorithms/designs for getting the final histogram and then determine which is faster. All methods should
+	use the maximum amount of thread availible. Ensure the entire file is being read.
+
+	Design 1: Global Histogram
+		All threads share one global histogram and share it. Results used in this histogram will be used for output.
+
+	Design 2: Local Histogram
+		All threads have a dedicated local histogram that they write to, and they are all accumulated in the end into
+		a main histogram.
+	Notes:
+		256 possible ascii values
+		remember to close threads after exit of the critical sections
+		ENSURE PROGRAM CAN RUN WITH A FILE NAME INPUT AT THE COMMAND LINE
+
+*/
+
+#include <algorithm>
+#include <iostream>
+#include <fstream>		//used to access and read file
+#include <thread>
+#include <string>
+#include <vector>
+#include <mutex>
+#include <atomic>
+#include <array>
+using namespace std;
+
+void fileToMemoryTransfer(const char* fileName, char** data, size_t& numOfBytes) {
+	//initialization of streams
+	streampos begin, end;
+	ifstream inFile(fileName, ios::in | ios::binary | ios::ate);
+	if (!inFile)
+	{
+		cerr << "Cannot open " << fileName << endl;
+		inFile.close();
+		exit(1);
+	}
+	size_t size = inFile.tellg();
+	char* buffer = new char[size];
+
+	inFile.seekg(0, ios::beg);
+	inFile.read(buffer, size);
+	inFile.close();
+
+	buffer[size] = '\0';
+
+	*data = buffer;
+	numOfBytes = size;
+}
+
+void globalHistogramSolution(unsigned int numThreads, unsigned int numBytes, char* data, unsigned int* histogram) {
+	unsigned int blockSize = numBytes / numThreads;
+	/* if the file does not evenly divide amongst threads,
+	extra bytes must still be allocated */
+	unsigned int extra = numBytes % numThreads;
+	unsigned int start = 0;
+	unsigned int end = blockSize;
+	vector<thread> workers;
+	mutex m;
+
+	for (size_t t = 0; t < numThreads; t++) {
+		//if threads cannot divide file evenly, then the last thread performs the extra work
+		//if there was no extra work, threads split evenly and can conclude the work
+		if (t == numThreads-1) { end += extra; }
+
+		workers.push_back(thread([start, end, data, &histogram, &m]() {
+
+			for (size_t i = start; i < end; i++) {
+				//thisByte gets assigned the ascii value of data[i]
+				unsigned char thisByte = data[i];
+
+				//lock_guard protects the following critical section in which multiple threads could try to write at the same time
+				lock_guard<mutex> lock(m);
+
+				//increment the histogram count using the ascii number as the index
+				if (thisByte < 256) { histogram[thisByte] += 1; }
+			}
+
+			}));
+		//after a thread terminates it's work, then it increments the 'window' for the next thread
+		start = end;
+		end = start + blockSize;
+	}
+	//wait for all threads to end and then join them
+	for_each(workers.begin(), workers.end(), [](thread& t) {t.join(); });
+}
+
+void localHistogramSolution(unsigned int numThreads, unsigned int numBytes, char* data, unsigned int* generalHistogram) {
+	unsigned int blockSize = numBytes / numThreads;
+	unsigned int extra = numBytes % numThreads;
+	unsigned int start = 0;
+	unsigned int end = blockSize;
+
+	//Vector initialized and already holds local histograms for threads to write to
+	vector<array<unsigned int, 256>> vecOfLocalHist(numThreads, array<unsigned int, 256> {0});
+
+	//vector holding the amount of threads
+	vector<thread> workers;
+	mutex m;
+
+	cout << "Before intial for loop\n\n";
+
+	for (size_t t = 0; t < numThreads; t++) {
+		//if bytes don't divide evenly through 
+		if (t == numThreads -1) {
+			end += extra;
+		}
+		//threads created and then pushed into a vector.
+		workers.push_back(thread([data, &generalHistogram, start, end,t, &m, &vecOfLocalHist]() {
+			//setup for loop to iterate through their section of data
+			for (size_t i = start; i < end; i++) {
+				//thisByte gets assigned the ascii value of data[i]
+				unsigned char thisByte = data[i];
+
+				//increment the histogram count using the ascii number as the index
+				if (thisByte < 256) { vecOfLocalHist[t][thisByte] += 1; }
+			}
+
+		}));
+
+		//after work of thread is done, increment the 'window' for next thread
+		start = end;
+		end = start + blockSize;
+	}
+	//join threads after they complete their work
+	for (auto& t : workers) { t.join(); }
+
+	//assigning the updated counts to the general histogram, this loop iterates through the number of local histograms (x-axis)
+	for (size_t t = 0; t < numThreads; t++) {	
+
+		//this for loop iterates through the local histograms up to 255 (y axis)
+		for (size_t j = 0; j < 256; j++) {		
+
+			//update the counts as we iterate through each individual local histogram
+			if (vecOfLocalHist[t][j] > 0) {		
+				//Note: There is no race condition here because every thread is restricted to its own 'column' representing it's local histogram
+				generalHistogram[j] += vecOfLocalHist[t][j];
+			}
+		}
+	}
+}
+
+
+
+/*
+	argc represents argument count, while argv represents an array of arguments, in this case, a c-string input
+	Class example: matrixMultiple.exe -n 2000
+		argv[0]: matrixMultiple.exe
+		argv[1]: -n
+		argv[2]: 2000
+
+		argc = 3
+*/
+int main(int argc, char* argv[]) {
+	//because we only want a .exe and filename parameter, don't accept more than two parameters
+	if (argc != 2) {
+		cerr << "Usage: " << argv[0] << " <file path>" << endl;
+		return 1;
+	}
+	//this will take in the first argument 
+	const char* fileName = argv[1];
+
+	size_t numBytes = 0;
+	char* data = nullptr;
+	const unsigned int numThreads = thread::hardware_concurrency();
+
+	//File is read and then the function returns the byte size and the interpreted data
+	fileToMemoryTransfer(fileName, &data, numBytes);
+
+	vector<thread> workers;
+
+	//arrays of 255 initialized as 0
+	unsigned int histogram1[256] = { 0 };
+	//for some reason this array is way easier to work with than the regular "datatype name[size]" array
+	
+	//unsigned int histogram2[256] = { 0 };
+	unsigned int histogram2[256]{0};
+	/*==========	GLOBAL HISTOGRAM APPROACH	==========*/
+	// All threads access the same global histogram and increment counts, race condition in writing to the histogram
+	// This function returns the altered histogram count values according to what data extracted from the given file
+	globalHistogramSolution(numThreads, numBytes, data, histogram1);
+
+	/*===========		LOCAL-HISTOGRAM APPROACH		==========*/
+	//All threads keep an individual histogram of their own section before then transferring it to the globalHistogram
+	localHistogramSolution(numThreads, numBytes, data, histogram2);
+
+	/*==========	OUTPUT STATEMENTS	==========*/
+	cout << "Run with one global histogram\n";
+	for (int i = 0; i < 256; i++) {
+		if (histogram1[i] > 0) {
+			cout << i << ": " << histogram1[i] << endl;
+		}
+	}
+
+	cout << "Run with one local histograms\n";
+	for (int i = 0; i < 256; i++) {
+		if (histogram2[i] > 0) {
+			cout << i << ": " << histogram2[i] << endl;
+		}
+	}
+
+	return  0;
+}
